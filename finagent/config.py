@@ -12,20 +12,20 @@ load_dotenv()
 
 @dataclass(frozen=True)
 class Settings:
-    anthropic_api_key: str
+    gemini_api_key: str
     model: str
     max_revisions: int
 
     @classmethod
     def load(cls) -> "Settings":
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        api_key = os.environ.get("GEMINI_API_KEY", "")
         if not api_key:
             raise RuntimeError(
-                "ANTHROPIC_API_KEY is not set. Copy .env.example to .env and fill it in."
+                "GEMINI_API_KEY is not set. Copy .env.example to .env and fill it in."
             )
         return cls(
-            anthropic_api_key=api_key,
-            model=os.environ.get("FINAGENT_MODEL", "claude-sonnet-4-5"),
+            gemini_api_key=api_key,
+            model=os.environ.get("FINAGENT_MODEL", "gemini-3.5-flash"),
             max_revisions=int(os.environ.get("FINAGENT_MAX_REVISIONS", "2")),
         )
 
