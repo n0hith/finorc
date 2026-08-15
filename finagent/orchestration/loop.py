@@ -17,6 +17,7 @@ from finagent.agents.critic import Critic
 from finagent.agents.planner import Planner
 from finagent.orchestration.context import AnalystOutput, ResearchContext
 from finagent.orchestration.events import EventEmitter, EventSink, print_sink
+from finagent.verification.groundedness import verify as verify_groundedness
 
 
 @dataclass
@@ -60,7 +61,23 @@ def run_research(
                 claims=[{"text": c.text, "supporting_snippet_ids": c.supporting_snippet_ids} for c in output.claims],
             )
 
-            review = critic.run(task, output)
+            groundedness = verify_groundedness(output)
+            events.emit(
+                "verification_done",
+                task_id=task.id,
+                claim_verifications=[
+                    {
+                        "claim_text": v.claim_text,
+                        "verdict": v.verdict,
+                        "score": v.score,
+                        "best_snippet_id": v.best_snippet_id,
+                        "flagged": v.flagged,
+                    }
+                    for v in groundedness.claim_verifications
+                ],
+            )
+
+            review = critic.run(task, output, groundedness=groundedness)
             context.critic_reviews.append(review)
             events.emit(
                 "critic_review",
