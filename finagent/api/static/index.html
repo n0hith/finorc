@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>FinAgent</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #0b1020;
+    --panel: #131a2e;
+    --border: #232c47;
+    --text: #e6e9f2;
+    --muted: #8b93ab;
+    --accent: #5b8cff;
+    --approved: #3ecf8e;
+    --revise: #f2a93b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  header {
+    padding: 2rem 1.5rem 1rem;
+    text-align: center;
+  }
+  header h1 { margin: 0; font-size: 1.6rem; }
+  header p { color: var(--muted); margin: 0.4rem 0 0; font-size: 0.9rem; }
+  main {
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 0 1.5rem 4rem;
+  }
+  .composer {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 2rem;
+  }
+  .composer input {
+    flex: 1;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    font-size: 0.95rem;
+  }
+  .composer button {
+    padding: 0.75rem 1.4rem;
+    border-radius: 8px;
+    border: none;
+    background: var(--accent);
+    color: white;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .composer button:disabled { opacity: 0.5; cursor: default; }
+
+  .status {
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin-bottom: 1.5rem;
+    display: none;
+  }
+  .status.active { display: block; }
+
+  .plan {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 1.5rem;
+  }
+  .plan .chip {
+    padding: 0.3rem 0.7rem;
+    border-radius: 999px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.2rem 1.4rem;
+    margin-bottom: 1rem;
+  }
+  .card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.6rem;
+  }
+  .card-head h3 { margin: 0; font-size: 1rem; }
+  .badge {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+  }
+  .badge.approved { background: rgba(62,207,142,0.15); color: var(--approved); }
+  .badge.revise { background: rgba(242,169,59,0.15); color: var(--revise); }
+
+  .summary { color: var(--text); font-size: 0.92rem; line-height: 1.5; margin-bottom: 0.8rem; }
+  .claims { list-style: none; padding: 0; margin: 0; }
+  .claims li {
+    font-size: 0.87rem;
+    color: var(--muted);
+    padding: 0.4rem 0;
+    border-top: 1px solid var(--border);
+  }
+  .claims li:first-child { border-top: none; }
+  .claims .cite {
+    color: var(--accent);
+    font-size: 0.75rem;
+    margin-left: 0.4rem;
+  }
+  .critic-notes {
+    margin-top: 0.7rem;
+    font-size: 0.82rem;
+    color: var(--muted);
+    font-style: italic;
+  }
+
+  details.trace {
+    margin-top: 2rem;
+  }
+  details.trace summary {
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+  pre {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    overflow-x: auto;
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin-top: 0.8rem;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>FinAgent</h1>
+  <p>Planner &rarr; Analyst &rarr; Critic, grounded in cited source data</p>
+</header>
+<main>
+  <div class="composer">
+    <input id="question" type="text"
+      placeholder="Why are AI data center buildouts accelerating?" />
+    <button id="submit">Research</button>
+  </div>
+  <div class="status" id="status"></div>
+  <div class="plan" id="plan"></div>
+  <div id="results"></div>
+  <details class="trace" id="traceWrap" style="display:none">
+    <summary>Raw event trace</summary>
+    <pre id="trace"></pre>
+  </details>
+</main>
+
+<script>
+const questionEl = document.getElementById('question');
+const submitEl = document.getElementById('submit');
+const statusEl = document.getElementById('status');
+const planEl = document.getElementById('plan');
+const resultsEl = document.getElementById('results');
+const traceWrap = document.getElementById('traceWrap');
+const traceEl = document.getElementById('trace');
+
+const DEFAULT_QUESTION = "Why are AI data center buildouts accelerating, and what could constrain them?";
+
+async function runResearch() {
+  const question = questionEl.value.trim() || DEFAULT_QUESTION;
+  submitEl.disabled = true;
+  statusEl.textContent = 'Running Planner → Analyst → Critic… (can take a minute or two)';
+  statusEl.classList.add('active');
+  planEl.innerHTML = '';
+  resultsEl.innerHTML = '';
+  traceWrap.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/research', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question }),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`${res.status}: ${body}`);
+    }
+    const data = await res.json();
+    render(data);
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + err.message;
+    statusEl.classList.add('active');
+    return;
+  }
+  statusEl.classList.remove('active');
+  submitEl.disabled = false;
+}
+
+function render(data) {
+  const plannerEvent = data.events.find(e => e.type === 'planner_done');
+  const criticEvents = data.events.filter(e => e.type === 'critic_review');
+  const latestVerdictByTask = {};
+  criticEvents.forEach(e => { latestVerdictByTask[e.data.task_id] = e; });
+
+  if (plannerEvent) {
+    planEl.innerHTML = plannerEvent.data.tasks
+      .map(t => `<span class="chip">${escapeHtml(t.id)}</span>`)
+      .join('');
+  }
+
+  resultsEl.innerHTML = data.final_outputs.map(output => {
+    const review = latestVerdictByTask[output.task_id];
+    const verdict = review ? review.data.verdict : 'unknown';
+    const notes = review ? review.data.notes : '';
+    const claims = output.claims.map(c =>
+      `<li>${escapeHtml(c.text)}<span class="cite">[${c.supporting_snippet_ids.join(', ')}]</span></li>`
+    ).join('');
+    return `
+      <div class="card">
+        <div class="card-head">
+          <h3>${escapeHtml(output.task_id)}</h3>
+          <span class="badge ${verdict}">${escapeHtml(verdict)}</span>
+        </div>
+        <div class="summary">${escapeHtml(output.summary)}</div>
+        <ul class="claims">${claims}</ul>
+        ${notes ? `<div class="critic-notes">Critic: ${escapeHtml(notes)}</div>` : ''}
+      </div>
+    `;
+  }).join('');
+
+  traceEl.textContent = JSON.stringify(data.events, null, 2);
+  traceWrap.style.display = 'block';
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+submitEl.addEventListener('click', runResearch);
+questionEl.addEventListener('keydown', e => { if (e.key === 'Enter') runResearch(); });
+</script>
+</body>
+</html>

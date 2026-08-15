@@ -25,7 +25,7 @@ class Settings:
             )
         return cls(
             gemini_api_key=api_key,
-            model=os.environ.get("FINAGENT_MODEL", "gemini-3.5-flash"),
+            model=os.environ.get("FINAGENT_MODEL", "gemini-flash-lite-latest"),
             max_revisions=int(os.environ.get("FINAGENT_MAX_REVISIONS", "2")),
         )
 

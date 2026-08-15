@@ -9,10 +9,15 @@ by the data it retrieved.
 Orchestration between agents is hand-rolled (no LangGraph/CrewAI/AutoGen) so
 every part of the control flow is explicit and easy to reason about.
 
-## Status: Phase 1 complete
+## Status: Phase 1 complete (+ a thin API/frontend ahead of schedule)
 
 Agent skeleton, hand-rolled orchestration loop, and a stubbed data source.
 No real data ingestion or groundedness verification yet — those are Phase 2+.
+
+A minimal FastAPI backend and static frontend were added out of plan-order
+(originally Phase 5/7) so the pipeline could be demoed in a browser instead
+of a terminal. This is intentionally thin — see "Frontend / API (early,
+thin version)" below for what it is and isn't.
 
 ## Architecture
 
@@ -34,7 +39,9 @@ finagent/
                        -> list[DataSnippet]` interface is the contract Phase
                        3's real RSS ingester must match.
   verification/       Phase 2: NLI groundedness checker goes here.
-  api/                Phase 5: FastAPI + SSE endpoint goes here.
+  api/
+    main.py            Thin FastAPI wrapper (see below) — not Phase 5 proper.
+    static/index.html   Single-page vanilla HTML/JS frontend.
   config.py           Env-based settings (API key, model, revision cap).
 scripts/
   run_research.py     CLI entry point — runs one research question and
@@ -76,11 +83,39 @@ Phase 5 will push over SSE, so nothing about the event schema needs to change
 when streaming is added, only the sink (`print_sink` -> an SSE queue sink).
 
 **LLM provider: Gemini (`google-genai`), not Anthropic.** Originally built
-against the Anthropic API; switched to Gemini (`gemini-3.5-flash` by default)
-because that's the API key available for this project. The provider is
-isolated entirely inside `agents/base.py::BaseAgent._call_tool` — swapping
-providers again means changing one file, not the three agent classes, since
-they only ever call `self._call_tool(...)` with a JSON Schema.
+against the Anthropic API; switched to Gemini because that's the API key
+available for this project. The provider is isolated entirely inside
+`agents/base.py::BaseAgent._call_tool` — swapping providers again means
+changing one file, not the three agent classes, since they only ever call
+`self._call_tool(...)` with a JSON Schema. Default model is
+`gemini-flash-lite-latest` (see "A note on free-tier quotas" below for why).
+
+## Frontend / API (early, thin version)
+
+`finagent/api/main.py` exposes one endpoint, `POST /api/research`, that runs
+the full orchestration loop **synchronously** and returns the complete event
+trace + final result as one JSON blob when it's done. `finagent/api/static/index.html`
+is a single vanilla HTML/JS/CSS page (no build step, no framework) that posts
+a question to that endpoint and renders the plan, each sub-task's grounded
+claims with citations, and the Critic's verdict.
+
+This is explicitly **not** Phase 5 or Phase 7: there's no streaming (the
+browser just waits on one long request — several seconds to a couple of
+minutes depending on rate limits), and the page is static HTML rather than a
+proper frontend app. It exists so the pipeline is demoable in a browser
+instead of a terminal. When Phase 5 lands, this handler's body becomes an SSE
+generator that yields each event as `EventEmitter` produces it — the
+orchestration loop, event schema, and `ResearchContext` underneath don't
+change, only how results reach the client. The current `index.html` will
+likely be replaced outright once there's a real Phase 7 frontend.
+
+Run it:
+
+```bash
+uvicorn finagent.api.main:app --reload
+```
+
+Then open `http://localhost:8000`.
 
 ## Setup
 
@@ -91,10 +126,22 @@ pip install -r requirements.txt
 cp .env.example .env  # then fill in GEMINI_API_KEY
 ```
 
-Get a key at https://aistudio.google.com/apikey. The free tier caps
-`gemini-3.5-flash` at 5 requests/minute — `BaseAgent` retries once on a 429,
-honoring the server's suggested `retryDelay`, which is enough for a single
-research run end-to-end but will add latency.
+Get a key at https://aistudio.google.com/apikey.
+
+### A note on free-tier quotas
+
+Free-tier Gemini keys have both a per-minute rate limit and a **separate,
+much stricter per-day quota, tracked per model**. `gemini-3.5-flash`'s free
+tier is 20 requests/day, which a single 4-sub-task research run (~9 calls)
+burns through in two or three tries. `BaseAgent._generate_with_retry` retries
+on 429s using the server's suggested `retryDelay`, which smooths over the
+per-minute limit, but there's no working around an exhausted daily quota —
+retries just fail again until the next day. The default model is therefore
+`gemini-flash-lite-latest`, which sits in a separate daily-quota bucket and
+held up fine under testing. If you hit `429 RESOURCE_EXHAUSTED` mentioning
+`GenerateRequestsPerDayPerProjectPerModel-FreeTier`, that's this limit, not a
+bug — either wait for the daily reset or point `FINAGENT_MODEL` at a
+different model with its own quota.
 
 ## Running it
 
