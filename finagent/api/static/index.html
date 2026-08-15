@@ -119,6 +119,19 @@
     font-size: 0.75rem;
     margin-left: 0.4rem;
   }
+  .claims .flag {
+    display: inline-block;
+    margin-left: 0.5rem;
+    padding: 0.05rem 0.45rem;
+    border-radius: 999px;
+    background: rgba(242,169,59,0.15);
+    color: var(--revise);
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    cursor: help;
+  }
   .critic-notes {
     margin-top: 0.7rem;
     font-size: 0.82rem;
@@ -210,8 +223,11 @@ async function runResearch() {
 function render(data) {
   const plannerEvent = data.events.find(e => e.type === 'planner_done');
   const criticEvents = data.events.filter(e => e.type === 'critic_review');
+  const verificationEvents = data.events.filter(e => e.type === 'verification_done');
   const latestVerdictByTask = {};
   criticEvents.forEach(e => { latestVerdictByTask[e.data.task_id] = e; });
+  const latestVerificationByTask = {};
+  verificationEvents.forEach(e => { latestVerificationByTask[e.data.task_id] = e; });
 
   if (plannerEvent) {
     planEl.innerHTML = plannerEvent.data.tasks
@@ -223,9 +239,18 @@ function render(data) {
     const review = latestVerdictByTask[output.task_id];
     const verdict = review ? review.data.verdict : 'unknown';
     const notes = review ? review.data.notes : '';
-    const claims = output.claims.map(c =>
-      `<li>${escapeHtml(c.text)}<span class="cite">[${c.supporting_snippet_ids.join(', ')}]</span></li>`
-    ).join('');
+    const verification = latestVerificationByTask[output.task_id];
+    const groundednessByClaim = {};
+    if (verification) {
+      verification.data.claim_verifications.forEach(v => { groundednessByClaim[v.claim_text] = v; });
+    }
+    const claims = output.claims.map(c => {
+      const g = groundednessByClaim[c.text];
+      const flag = g && g.flagged
+        ? `<span class="flag" title="NLI verdict: ${escapeHtml(g.verdict)} (${(g.score * 100).toFixed(0)}% confidence)">unverified</span>`
+        : '';
+      return `<li>${escapeHtml(c.text)}<span class="cite">[${c.supporting_snippet_ids.join(', ')}]</span>${flag}</li>`;
+    }).join('');
     return `
       <div class="card">
         <div class="card-head">

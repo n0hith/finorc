@@ -9,10 +9,12 @@ by the data it retrieved.
 Orchestration between agents is hand-rolled (no LangGraph/CrewAI/AutoGen) so
 every part of the control flow is explicit and easy to reason about.
 
-## Status: Phase 1 complete (+ a thin API/frontend ahead of schedule)
+## Status: Phase 2 complete (+ a thin API/frontend ahead of schedule)
 
-Agent skeleton, hand-rolled orchestration loop, and a stubbed data source.
-No real data ingestion or groundedness verification yet — those are Phase 2+.
+Agent skeleton, hand-rolled orchestration loop, a stubbed data source, and
+NLI-based groundedness verification between the Analyst and Critic. No real
+data ingestion, sentiment scoring, streaming, or eval harness yet — those are
+Phase 3+.
 
 A minimal FastAPI backend and static frontend were added out of plan-order
 (originally Phase 5/7) so the pipeline could be demoed in a browser instead
@@ -38,7 +40,13 @@ finagent/
     stub_source.py    Placeholder "financial news" source. Its `fetch(query)
                        -> list[DataSnippet]` interface is the contract Phase
                        3's real RSS ingester must match.
-  verification/       Phase 2: NLI groundedness checker goes here.
+  verification/
+    nli.py             Local NLI model wrapper (entailment/neutral/
+                        contradiction between a source snippet and a claim).
+    groundedness.py     Runs NLI over every Analyst claim against the
+                        snippet(s) it cites; flags claims not clearly
+                        entailed. Non-LLM, deterministic, testable in
+                        isolation.
   api/
     main.py            Thin FastAPI wrapper (see below) — not Phase 5 proper.
     static/index.html   Single-page vanilla HTML/JS frontend.
@@ -89,6 +97,20 @@ available for this project. The provider is isolated entirely inside
 changing one file, not the three agent classes, since they only ever call
 `self._call_tool(...)` with a JSON Schema. Default model is
 `gemini-flash-lite-latest` (see "A note on free-tier quotas" below for why).
+
+**Groundedness verification: a separate NLI step, not something inside the
+Critic.** `finagent/orchestration/loop.py` calls
+`verification.groundedness.verify(output)` right after the Analyst runs and
+before the Critic does. It runs local NLI (`MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli`,
+via `transformers`) between each claim and the snippet(s) it cites, and flags
+any claim not clearly *entailed* (neutral, contradicted, or citing nothing at
+all counts as unsupported). The result is hard evidence handed to the Critic
+as part of its prompt, not something the Critic has to notice on its own.
+This was chosen over folding the check into the Critic's own call because it
+keeps the verifier deterministic, non-LLM, and unit-testable in isolation
+(`tests/test_groundedness.py` exercises it with zero Gemini calls) — and
+because "the LLM grades its own homework" is a weaker groundedness signal
+than an independent classifier the LLM then has to explain away.
 
 ## Frontend / API (early, thin version)
 
@@ -153,16 +175,17 @@ With no argument it runs a default sample question. Output is the full event
 trace (one JSON block per event, to stdout) followed by a `FINAL RESULT`
 section with each sub-task's summary and cited claims.
 
-## Interface for Phase 2 (NLI groundedness verification)
+## Testing the groundedness verifier in isolation
 
-Phase 2 slots a verifier between `analyst_step_done` and the Critic call in
-`orchestration/loop.py`. It will consume an `AnalystOutput` (specifically
-`claims: list[Claim]`, where each `Claim` has `text` and
-`supporting_snippet_ids`) plus the `snippets_used: list[DataSnippet]` those
-IDs point into, and check whether each claim's text is actually entailed by
-the snippet(s) it cites. That result becomes a new `verification_done` event
-and additional signal fed to the Critic — no changes needed to `Planner`,
-`Analyst`, or the `ResearchContext` shape to support this.
+```bash
+python tests/test_groundedness.py
+```
+
+Builds a synthetic `AnalystOutput` against Phase 1's stubbed snippets with
+one verbatim claim, one fabricated claim, and one uncited claim, and asserts
+the verifier accepts the first and flags the other two. No Gemini calls
+involved — this only exercises `finagent/verification/`. First run downloads
+the ~370MB NLI model from HuggingFace and caches it locally.
 
 ## Interface for Phase 3 (RSS ingestion)
 
