@@ -16,11 +16,27 @@ from typing import Literal
 
 
 @dataclass
+class SentimentScore:
+    """FinBERT's sentiment classification of one snippet's text.
+
+    `label` is FinBERT's own vocabulary (positive/negative/neutral), kept
+    as-is rather than remapped, so a snippet's sentiment can be shown or
+    reasoned about without translation.
+    """
+
+    label: Literal["positive", "negative", "neutral"]
+    score: float
+    """Softmax probability of the predicted label, in [0, 1]."""
+
+
+@dataclass
 class DataSnippet:
     """A single piece of source data (news article, filing excerpt, etc.).
 
     Shape is intentionally generic so a real RSS ingester (Phase 3) can
-    produce these without the Analyst or verifier code changing.
+    produce these without the Analyst or verifier code changing. `sentiment`
+    is optional and `None` for sources that don't score it (e.g. Phase 1's
+    stub) - the Analyst treats a missing score as "no signal", not as neutral.
     """
 
     id: str
@@ -29,6 +45,7 @@ class DataSnippet:
     text: str
     published_at: str
     url: str
+    sentiment: SentimentScore | None = None
 
 
 @dataclass

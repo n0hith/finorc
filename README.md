@@ -9,12 +9,12 @@ by the data it retrieved.
 Orchestration between agents is hand-rolled (no LangGraph/CrewAI/AutoGen) so
 every part of the control flow is explicit and easy to reason about.
 
-## Status: Phase 3 complete (+ a thin API/frontend ahead of schedule)
+## Status: Phase 4 complete (+ a thin API/frontend ahead of schedule)
 
 Agent skeleton, hand-rolled orchestration loop, NLI-based groundedness
-verification between the Analyst and Critic, and real financial news
-ingestion from RSS feeds. No sentiment scoring, streaming, or eval harness
-yet — those are Phase 4+.
+verification between the Analyst and Critic, real financial news ingestion
+from RSS feeds, and FinBERT sentiment scoring on that ingested news. No
+streaming or eval harness yet — those are Phase 5+.
 
 A minimal FastAPI backend and static frontend were added out of plan-order
 (originally Phase 5/7) so the pipeline could be demoed in a browser instead
@@ -54,6 +54,10 @@ finagent/
                         snippet(s) it cites; flags claims not clearly
                         entailed. Non-LLM, deterministic, testable in
                         isolation.
+  analysis/
+    finbert.py          Local FinBERT sentiment classifier (positive/
+                        negative/neutral). Same shape as verification/nli.py:
+                        standalone, non-LLM, loaded once per process.
   api/
     main.py            Thin FastAPI wrapper (see below) — not Phase 5 proper.
     static/index.html   Single-page vanilla HTML/JS frontend.
@@ -170,6 +174,49 @@ verifier being a noisy signal the Critic weighs, not a guarantee. Worth
 knowing for Phase 6's eval harness (groundedness *verifier* accuracy vs.
 *pipeline* accuracy are different numbers).
 
+### Phase 4: FinBERT sentiment scoring
+
+**Scored at the source, not lazily at the point of use.** `rss_source.fetch()`
+runs every snippet's title+text through FinBERT once, right when it's parsed,
+and stores the result on `DataSnippet.sentiment` (a new optional field —
+`None` for sources that don't score it, namely `stub_source`). The
+alternative — scoring on-demand wherever a snippet is read — was rejected
+because it would mean every consumer of `DataSnippet` needs to know sentiment
+scoring exists and remember to call it; scoring at the source means
+`sentiment` is just always populated for anything that came from a live feed,
+with no second call for a consumer to forget.
+
+**Sentiment is a labeled model output, not freeform text.** `SentimentScore`
+(`label`: positive/negative/neutral, `score`: softmax confidence) is a small
+dataclass, not a prose description — exactly like NLI's `verdict`/`score`
+shape in Phase 2. This keeps it structured signal the Analyst's prompt can
+present compactly (`[sentiment: negative 0.95]`) rather than another block of
+text to parse.
+
+**The Analyst is told, explicitly, that sentiment describes tone, not fact.**
+FinBERT's output is scoring how an article is *written*, not asserting
+anything that happened — "oil prices fell" being tagged `negative` doesn't
+mean the fall is disputed, it means the article reads negatively. The
+Analyst's system prompt says this directly: sentiment is secondary signal for
+sub-tasks about market mood/outlook, never something to cite as a claim or
+repeat as if it were a fact from the article. This boundary matters for
+Phase 2's groundedness verifier too — a claim like "sentiment is negative" has
+nothing in the article text to be NLI-entailed against, so letting the
+Analyst state sentiment as a claim would produce a false hallucination flag
+on something that's actually true, just not text-grounded in the normal
+sense.
+
+**Model choice: ProsusAI/finbert, not a general sentiment model.** Financial
+language doesn't carry ordinary-English sentiment polarity ("earnings beat",
+"guidance cut" aren't obviously positive/negative to a general model), so a
+model fine-tuned specifically on financial text was used instead of a
+generic one — same reasoning as Phase 2 picking an NLI model trained across
+MNLI/FEVER/ANLI rather than a narrower one.
+
+No new dependency was needed — `transformers`/`torch` were already pulled in
+for Phase 2's NLI model, and FinBERT loads through the same
+`AutoModelForSequenceClassification` API.
+
 ## Frontend / API (early, thin version)
 
 `finagent/api/main.py` exposes one endpoint, `POST /api/research`, that runs
@@ -245,13 +292,27 @@ the verifier accepts the first and flags the other two. No Gemini calls
 involved — this only exercises `finagent/verification/`. First run downloads
 the ~370MB NLI model from HuggingFace and caches it locally.
 
-## Interface for Phase 4 (FinBERT sentiment scoring)
+## Testing the sentiment classifier in isolation
 
-Phase 4 applies FinBERT to `rss_source.py`'s output to produce structured
-sentiment, fed to the Analyst as signal rather than raw text alone. The
-natural seam: `DataSnippet` currently has no sentiment field, so either (a)
-add an optional `sentiment: SentimentScore | None` to `DataSnippet` itself
-and populate it in `rss_source.fetch()`, or (b) score snippets in a separate
-step between `fetch()` and the Analyst and pass both to `Analyst.run()`. This
-is a real design fork (data model change vs. pipeline step) worth deciding
-explicitly before Phase 4 starts rather than defaulting silently.
+```bash
+python tests/test_sentiment.py
+```
+
+Runs FinBERT on one clearly positive, one negative, and one neutral sentence
+and asserts each gets the expected label. No Gemini calls, no RSS fetch —
+only exercises `finagent/analysis/finbert.py`.
+
+## Interface for Phase 5 (FastAPI + SSE streaming)
+
+Phase 5 replaces `finagent/api/main.py`'s synchronous handler body with an SSE
+generator that yields each event as `EventEmitter` produces it, instead of
+collecting them into one JSON response. The event schema in
+`orchestration/events.py` (`research_started`, `planner_done`,
+`analyst_step_started`, `analyst_step_done`, `verification_done`,
+`critic_review`, `revision_requested`, `research_completed`) doesn't need to
+change — `run_research()`'s `event_sink` callback is already the exact seam
+to swap: `print_sink`/`collect` become a sink that pushes onto a queue an
+async generator reads from and formats as `text/event-stream`. Nothing about
+`ResearchContext`, the agents, or `DataSnippet.sentiment` needs to change for
+this phase; it's purely a transport change, same as the README already noted
+back in Phase 1's design decisions.

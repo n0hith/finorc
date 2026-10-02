@@ -48,6 +48,11 @@ _INPUT_SCHEMA = {
 DataFetcher = Callable[[str], list[DataSnippet]]
 
 
+def _format_snippet(s: DataSnippet) -> str:
+    sentiment_tag = f" [sentiment: {s.sentiment.label} {s.sentiment.score:.2f}]" if s.sentiment else ""
+    return f"[{s.id}] ({s.source}, {s.published_at}){sentiment_tag} {s.title}\n{s.text}"
+
+
 class Analyst(BaseAgent):
     system_prompt = (
         "You are the Analyst in a financial research pipeline. You will be given "
@@ -56,7 +61,14 @@ class Analyst(BaseAgent):
         "knowledge. Produce a short summary and a list of discrete claims. Every "
         "claim MUST cite the snippet ID(s) that support it in "
         "supporting_snippet_ids. If the snippets don't support a claim, don't "
-        "make it. If you are given prior feedback, address it directly."
+        "make it. If you are given prior feedback, address it directly.\n\n"
+        "Some snippets include a [sentiment: label confidence] tag from an "
+        "automated financial-sentiment classifier. Treat this as a secondary "
+        "signal about the tone of that one article, not as a fact to cite or "
+        "repeat verbatim - it describes how the article is written, not an "
+        "event that happened. It is useful context for sub-tasks about market "
+        "mood, outlook, or reaction, but never a substitute for a claim "
+        "grounded in the article's actual text."
     )
 
     def __init__(self, *args, fetch: DataFetcher, **kwargs) -> None:
@@ -65,9 +77,7 @@ class Analyst(BaseAgent):
 
     def run(self, task: Task, revision_feedback: CriticReview | None = None) -> AnalystOutput:
         snippets = self._fetch(task.description)
-        snippet_block = "\n\n".join(
-            f"[{s.id}] ({s.source}, {s.published_at}) {s.title}\n{s.text}" for s in snippets
-        )
+        snippet_block = "\n\n".join(_format_snippet(s) for s in snippets)
 
         user_message = f"Sub-task: {task.description}\n\nSource snippets:\n{snippet_block}"
         if revision_feedback is not None:

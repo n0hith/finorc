@@ -28,6 +28,14 @@ Design notes:
   caching that means re-downloading the same handful of feeds N times in a
   few seconds. A simple TTL cache keyed by feed URL avoids that without
   needing any external cache.
+- **Sentiment scored here, at the source (Phase 4).** Each snippet is run
+  through FinBERT once, right after parsing, and the result is cached
+  alongside the snippet itself. The alternative - scoring lazily wherever a
+  snippet is consumed - would mean the Analyst (or anything else reading
+  `DataSnippet`s) needs to know sentiment scoring exists at all. Scoring at
+  the source means `DataSnippet.sentiment` is just always there, and
+  `stub_source.py` staying `sentiment=None` is a deliberate, visible
+  consequence of being a non-live source rather than an oversight.
 """
 
 from __future__ import annotations
@@ -40,6 +48,7 @@ from html import unescape
 
 import feedparser
 
+from finagent.analysis import finbert
 from finagent.orchestration.context import DataSnippet
 
 logger = logging.getLogger(__name__)
@@ -95,14 +104,17 @@ def _fetch_one_feed(name: str, url: str) -> list[DataSnippet]:
             entry_id = entry.get("id") or link
             if not entry_id:
                 continue
+            title = _strip_html(entry.get("title", ""))
+            text = _strip_html(entry.get("summary", ""))
             snippets.append(
                 DataSnippet(
                     id=entry_id,
                     source=feed_source,
-                    title=_strip_html(entry.get("title", "")),
-                    text=_strip_html(entry.get("summary", "")),
+                    title=title,
+                    text=text,
                     published_at=_parse_published_at(entry),
                     url=link,
+                    sentiment=finbert.classify(f"{title}. {text}" if text else title),
                 )
             )
     except Exception as exc:
