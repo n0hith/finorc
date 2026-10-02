@@ -22,7 +22,7 @@ from finagent.agents.analyst import Analyst
 from finagent.agents.critic import Critic
 from finagent.agents.planner import Planner
 from finagent.config import get_settings
-from finagent.data import stub_source
+from finagent.data import rss_source
 from finagent.orchestration.loop import run_research
 
 app = FastAPI(title="FinAgent API")
@@ -44,7 +44,7 @@ def index() -> FileResponse:
 def research(request: ResearchRequest) -> dict[str, Any]:
     settings = get_settings()
     planner = Planner()
-    analyst = Analyst(fetch=stub_source.fetch)
+    analyst = Analyst(fetch=rss_source.fetch)
     critic = Critic()
 
     collected_events: list[dict[str, Any]] = []

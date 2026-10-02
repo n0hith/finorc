@@ -17,7 +17,7 @@ from finagent.agents.analyst import Analyst
 from finagent.agents.critic import Critic
 from finagent.agents.planner import Planner
 from finagent.config import get_settings
-from finagent.data import stub_source
+from finagent.data import rss_source
 from finagent.orchestration.loop import run_research
 
 DEFAULT_QUESTION = "Why are AI data center buildouts accelerating, and what could constrain them?"
@@ -33,7 +33,7 @@ def main() -> None:
     settings = get_settings()
 
     planner = Planner()
-    analyst = Analyst(fetch=stub_source.fetch)
+    analyst = Analyst(fetch=rss_source.fetch)
     critic = Critic()
 
     result = run_research(

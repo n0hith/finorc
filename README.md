@@ -9,12 +9,12 @@ by the data it retrieved.
 Orchestration between agents is hand-rolled (no LangGraph/CrewAI/AutoGen) so
 every part of the control flow is explicit and easy to reason about.
 
-## Status: Phase 2 complete (+ a thin API/frontend ahead of schedule)
+## Status: Phase 3 complete (+ a thin API/frontend ahead of schedule)
 
-Agent skeleton, hand-rolled orchestration loop, a stubbed data source, and
-NLI-based groundedness verification between the Analyst and Critic. No real
-data ingestion, sentiment scoring, streaming, or eval harness yet — those are
-Phase 3+.
+Agent skeleton, hand-rolled orchestration loop, NLI-based groundedness
+verification between the Analyst and Critic, and real financial news
+ingestion from RSS feeds. No sentiment scoring, streaming, or eval harness
+yet — those are Phase 4+.
 
 A minimal FastAPI backend and static frontend were added out of plan-order
 (originally Phase 5/7) so the pipeline could be demoed in a browser instead
@@ -37,9 +37,16 @@ finagent/
     loop.py           The orchestration loop itself: Planner -> Analyst ->
                        Critic -> (revise up to N times) -> next task.
   data/
-    stub_source.py    Placeholder "financial news" source. Its `fetch(query)
-                       -> list[DataSnippet]` interface is the contract Phase
-                       3's real RSS ingester must match.
+    stub_source.py    Placeholder "financial news" source (4 fixed fake
+                       articles). Still used by `tests/test_groundedness.py`
+                       for a deterministic, network-free check of the
+                       verifier; no longer wired into the live pipeline.
+    rss_source.py     Phase 3's real data source: pulls recent headlines from
+                       a fixed set of financial RSS feeds (CNBC, MarketWatch,
+                       Yahoo Finance, Investing.com) and ranks them against
+                       the query by keyword overlap, same as the stub. Same
+                       `fetch(query, limit) -> list[DataSnippet]` signature,
+                       so Analyst/orchestration code didn't change at all.
   verification/
     nli.py             Local NLI model wrapper (entailment/neutral/
                         contradiction between a source snippet and a claim).
@@ -111,6 +118,57 @@ keeps the verifier deterministic, non-LLM, and unit-testable in isolation
 (`tests/test_groundedness.py` exercises it with zero Gemini calls) — and
 because "the LLM grades its own homework" is a weaker groundedness signal
 than an independent classifier the LLM then has to explain away.
+
+### Phase 3: RSS ingestion
+
+**Fixed feed list, not search.** `rss_source.py` pulls the latest ~20 items
+from each of four general financial-news RSS feeds (CNBC, MarketWatch, Yahoo
+Finance, Investing.com) — none of which support server-side query search —
+then ranks the combined pool against the query by keyword overlap, exactly
+like the Phase 1 stub did. The upgrade from Phase 1 isn't smarter ranking,
+it's that the pool being ranked is real, current news instead of four fixed
+fake articles. Feed URLs are hardcoded rather than env-configurable: there's
+no deployer-side reason to swap them, so adding config surface here would be
+unearned complexity.
+
+**Fails open to an empty list, not to the stub.** If a feed is down, slow, or
+malformed, it's logged and skipped — one bad feed doesn't sink a research
+run. If every feed fails, or nothing in the combined pool overlaps the query
+at all, `fetch()` returns `[]` rather than quietly substituting stub data.
+This was a deliberate choice over "fall back to stub so there's always an
+answer": a demo silently showing fabricated articles as if they were live
+data is worse than the Analyst honestly reporting it has no relevant source
+data for that sub-task (which is what happens in practice — see the example
+below). `tests/test_groundedness.py` still imports `stub_source` directly for
+its own deterministic, network-free assertions; the stub itself is otherwise
+unused now.
+
+**Short in-process cache, no persistence.** One research question fans out
+into several Analyst sub-tasks, each calling `fetch()` independently within
+seconds of each other. A feed-URL-keyed, 10-minute TTL in-memory cache avoids
+re-downloading the same four feeds multiple times per run, without needing
+any external cache (Redis, disk, etc.) for what is still a single-process
+demo app.
+
+**Observed effect on output quality.** General headline feeds don't always
+cover a narrow sub-task (e.g. a Planner-generated "OPEC+ supply dynamics"
+task may have zero matching live headlines on a given day). In that case the
+Analyst correctly reports it has no relevant data rather than inventing a
+claim, the groundedness verifier has nothing ungrounded to catch, and the
+Critic approves the honest non-answer. This is real behavior, not a
+hypothetical — it's a decent interview example of the pipeline doing the
+right thing specifically *because* the Analyst is barred from using
+knowledge outside the retrieved snippets.
+
+**Known rough edge, not fixed in Phase 3.** The NLI model sometimes verdicts
+a clearly-supported claim as `neutral` (flagged) when the Analyst paraphrases
+the source heavily, since DeBERTa-MNLI's entailment judgment is sensitive to
+surface wording, not just meaning. The Critic sees both the verdict and the
+underlying snippet text, and in testing correctly overrides a spurious
+`neutral` flag when the source obviously supports the claim — but this is the
+verifier being a noisy signal the Critic weighs, not a guarantee. Worth
+knowing for Phase 6's eval harness (groundedness *verifier* accuracy vs.
+*pipeline* accuracy are different numbers).
 
 ## Frontend / API (early, thin version)
 
@@ -187,19 +245,13 @@ the verifier accepts the first and flags the other two. No Gemini calls
 involved — this only exercises `finagent/verification/`. First run downloads
 the ~370MB NLI model from HuggingFace and caches it locally.
 
-## Interface for Phase 3 (RSS ingestion)
+## Interface for Phase 4 (FinBERT sentiment scoring)
 
-Phase 3 replaces `finagent/data/stub_source.py` with a real implementation
-of the same signature:
-
-```python
-def fetch(query: str, limit: int = 3) -> list[DataSnippet]
-```
-
-`DataSnippet` (`id`, `source`, `title`, `text`, `published_at`, `url`) is
-already source-agnostic — an RSS item maps onto it directly (item guid/link
--> `id`, feed name -> `source`, item title/description -> `title`/`text`,
-pubDate -> `published_at`, link -> `url`). `Analyst` and the orchestration
-loop only ever call `fetch(query)`, so this should be a swap of one import in
-`scripts/run_research.py` (and wherever `Analyst` is constructed later), not
-a change to `Analyst` itself.
+Phase 4 applies FinBERT to `rss_source.py`'s output to produce structured
+sentiment, fed to the Analyst as signal rather than raw text alone. The
+natural seam: `DataSnippet` currently has no sentiment field, so either (a)
+add an optional `sentiment: SentimentScore | None` to `DataSnippet` itself
+and populate it in `rss_source.fetch()`, or (b) score snippets in a separate
+step between `fetch()` and the Analyst and pass both to `Analyst.run()`. This
+is a real design fork (data model change vs. pipeline step) worth deciding
+explicitly before Phase 4 starts rather than defaulting silently.
