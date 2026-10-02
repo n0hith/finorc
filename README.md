@@ -9,17 +9,20 @@ by the data it retrieved.
 Orchestration between agents is hand-rolled (no LangGraph/CrewAI/AutoGen) so
 every part of the control flow is explicit and easy to reason about.
 
-## Status: Phase 4 complete (+ a thin API/frontend ahead of schedule)
+## Status: Phase 5 complete
 
 Agent skeleton, hand-rolled orchestration loop, NLI-based groundedness
 verification between the Analyst and Critic, real financial news ingestion
-from RSS feeds, and FinBERT sentiment scoring on that ingested news. No
-streaming or eval harness yet — those are Phase 5+.
+from RSS feeds, FinBERT sentiment scoring on that ingested news, and the
+FastAPI backend now streams every orchestration event live over SSE instead
+of blocking on one big JSON response. No eval harness or CI yet — that's
+Phase 6.
 
-A minimal FastAPI backend and static frontend were added out of plan-order
-(originally Phase 5/7) so the pipeline could be demoed in a browser instead
-of a terminal. This is intentionally thin — see "Frontend / API (early,
-thin version)" below for what it is and isn't.
+A FastAPI backend and static frontend were added ahead of Phase 7's "real"
+frontend so the pipeline could be demoed in a browser instead of a terminal.
+As of Phase 5 the backend streams live, matching the plan; the frontend
+itself is still intentionally simple (vanilla HTML/JS, no framework) — see
+"Frontend / API" below for what it is and isn't.
 
 ## Architecture
 
@@ -32,8 +35,9 @@ finagent/
     context.py       ResearchContext — shared mutable state threaded through
                       the loop (plan, analyst outputs, critic reviews).
     events.py         Event schema + EventEmitter. Every step emits a
-                       structured event; Phase 1 just prints them, Phase 5
-                       streams the same events over SSE.
+                       structured event; the CLI prints them, the API (Phase
+                       5) streams the same events over SSE - same schema,
+                       different sink.
     loop.py           The orchestration loop itself: Planner -> Analyst ->
                        Critic -> (revise up to N times) -> next task.
   data/
@@ -59,8 +63,10 @@ finagent/
                         negative/neutral). Same shape as verification/nli.py:
                         standalone, non-LLM, loaded once per process.
   api/
-    main.py            Thin FastAPI wrapper (see below) — not Phase 5 proper.
-    static/index.html   Single-page vanilla HTML/JS frontend.
+    main.py            FastAPI app. POST /api/research streams the
+                       orchestration event trace live as SSE (Phase 5).
+    static/index.html   Single-page vanilla HTML/JS frontend that consumes
+                        the SSE stream and renders results once it ends.
   config.py           Env-based settings (API key, model, revision cap).
 scripts/
   run_research.py     CLI entry point — runs one research question and
@@ -217,24 +223,45 @@ No new dependency was needed — `transformers`/`torch` were already pulled in
 for Phase 2's NLI model, and FinBERT loads through the same
 `AutoModelForSequenceClassification` API.
 
-## Frontend / API (early, thin version)
+## Frontend / API
 
-`finagent/api/main.py` exposes one endpoint, `POST /api/research`, that runs
-the full orchestration loop **synchronously** and returns the complete event
-trace + final result as one JSON blob when it's done. `finagent/api/static/index.html`
-is a single vanilla HTML/JS/CSS page (no build step, no framework) that posts
-a question to that endpoint and renders the plan, each sub-task's grounded
-claims with citations, and the Critic's verdict.
+`finagent/api/main.py` exposes one endpoint, `POST /api/research`, that now
+(Phase 5) **streams** the orchestration event trace to the client as Server-
+Sent Events as the pipeline runs, instead of blocking on one big JSON
+response. `finagent/api/static/index.html` is still a single vanilla
+HTML/JS/CSS page (no build step, no framework, by design) — it posts a
+question, reads the streamed response incrementally, updates a one-line
+status as events arrive, and renders the plan/claims/verdicts once the
+stream ends. It's a reasonable stand-in for the UI, but a real reasoning-
+trace view (showing the Planner/Analyst/Critic timeline live, not just a
+status line) is still Phase 7's job.
 
-This is explicitly **not** Phase 5 or Phase 7: there's no streaming (the
-browser just waits on one long request — several seconds to a couple of
-minutes depending on rate limits), and the page is static HTML rather than a
-proper frontend app. It exists so the pipeline is demoable in a browser
-instead of a terminal. When Phase 5 lands, this handler's body becomes an SSE
-generator that yields each event as `EventEmitter` produces it — the
-orchestration loop, event schema, and `ResearchContext` underneath don't
-change, only how results reach the client. The current `index.html` will
-likely be replaced outright once there's a real Phase 7 frontend.
+**Bridging sync orchestration with an async server.** `run_research()` and
+the agents beneath it make blocking calls (Gemini, RSS), so making the
+*whole* pipeline async would mean rewriting every agent and the orchestration
+loop. Instead, each request's pipeline run happens on a background thread
+that pushes `Event`s onto a `queue.Queue`; the response body is a plain
+*synchronous* generator that blocks on `queue.get()`, which Starlette detects
+and iterates in a thread pool automatically. The server's event loop is never
+blocked, and `orchestration/loop.py` didn't need to change at all - it still
+just takes a plain callback `event_sink`, which is now `queue.put` instead of
+`print`.
+
+**POST + manually-read stream, not GET + the browser's EventSource API.**
+`EventSource` only supports GET requests with no body, which doesn't fit a
+free-text research question. Instead the frontend calls `fetch()` and reads
+`response.body` as a `ReadableStream`, buffering incoming text and splitting
+on blank lines to recover each `data: <json>` message — the same
+`text/event-stream` wire format, just parsed by hand instead of by a browser
+API built around GET.
+
+**A `research_error` event exists only at this layer.** `run_research()`
+itself never catches exceptions - a CLI caller just lets them propagate and
+crash normally, which is correct for a script. But an unhandled exception on
+the background thread would otherwise vanish silently (nothing reads a
+thread's return value), so `main.py` wraps the pipeline call, catches any
+exception, and emits a `research_error` event with the message before closing
+the stream, letting the frontend show it instead of hanging.
 
 Run it:
 
@@ -302,17 +329,26 @@ Runs FinBERT on one clearly positive, one negative, and one neutral sentence
 and asserts each gets the expected label. No Gemini calls, no RSS fetch —
 only exercises `finagent/analysis/finbert.py`.
 
-## Interface for Phase 5 (FastAPI + SSE streaming)
+## Interface for Phase 6 (eval harness + CI)
 
-Phase 5 replaces `finagent/api/main.py`'s synchronous handler body with an SSE
-generator that yields each event as `EventEmitter` produces it, instead of
-collecting them into one JSON response. The event schema in
-`orchestration/events.py` (`research_started`, `planner_done`,
-`analyst_step_started`, `analyst_step_done`, `verification_done`,
-`critic_review`, `revision_requested`, `research_completed`) doesn't need to
-change — `run_research()`'s `event_sink` callback is already the exact seam
-to swap: `print_sink`/`collect` become a sink that pushes onto a queue an
-async generator reads from and formats as `text/event-stream`. Nothing about
-`ResearchContext`, the agents, or `DataSnippet.sentiment` needs to change for
-this phase; it's purely a transport change, same as the README already noted
-back in Phase 1's design decisions.
+Phase 6 needs a small, fixed benchmark set of research questions (with some
+notion of expected plan coverage / known-answerable sub-topics) to run the
+pipeline against repeatedly and score. Three things it can measure using
+pieces that already exist, without new instrumentation:
+
+- **Groundedness verifier accuracy** — `finagent/verification/groundedness.py`
+  already returns a structured `GroundednessReport`; a benchmark with
+  hand-labeled entailed/unsupported claims can check it against known-good
+  verdicts directly (no Gemini call needed, same as `tests/test_groundedness.py`).
+- **Critic catch rate** — how often the Critic's `verdict` agrees with the
+  groundedness report's `flagged` claims, and how often it overrides a false
+  flag correctly (the `neutral`-but-actually-fine case documented above is a
+  real example worth building a fixture from).
+- **Plan quality** — whether `Planner`'s sub-tasks are each answerable from
+  what `rss_source.fetch()` can realistically return, which the "Analyst
+  reports no data" pattern already surfaces as a signal rather than something
+  to special-case.
+
+This is a real design question Phase 6 should start with (what counts as a
+benchmark "case," and whether grading is rule-based vs. another LLM call) —
+flagging it now rather than deciding silently when that phase starts.

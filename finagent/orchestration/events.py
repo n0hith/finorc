@@ -24,7 +24,11 @@ EventType = Literal[
     "critic_review",
     "revision_requested",
     "research_completed",
+    "research_error",
 ]
+"""research_error is emitted only by the SSE transport (finagent/api/main.py)
+when the pipeline raises - run_research() itself never emits it, since a
+synchronous caller (the CLI) just lets the exception propagate normally."""
 
 
 @dataclass

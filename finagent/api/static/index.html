@@ -193,11 +193,14 @@ const DEFAULT_QUESTION = "Why are AI data center buildouts accelerating, and wha
 async function runResearch() {
   const question = questionEl.value.trim() || DEFAULT_QUESTION;
   submitEl.disabled = true;
-  statusEl.textContent = 'Running Planner → Analyst → Critic… (can take a minute or two)';
+  statusEl.textContent = 'Starting research…';
   statusEl.classList.add('active');
   planEl.innerHTML = '';
   resultsEl.innerHTML = '';
   traceWrap.style.display = 'none';
+
+  const events = [];
+  const taskOrder = [];
 
   try {
     const res = await fetch('/api/research', {
@@ -209,15 +212,89 @@ async function runResearch() {
       const body = await res.text();
       throw new Error(`${res.status}: ${body}`);
     }
-    const data = await res.json();
-    render(data);
+
+    // The response is text/event-stream, but we read it by hand via
+    // fetch()'s ReadableStream rather than the browser's EventSource API -
+    // EventSource only supports GET with no request body, and the research
+    // question is posted as JSON. Each SSE message is "data: <json>\n\n";
+    // chunks from the network don't necessarily align with message
+    // boundaries, so incoming text is buffered and split on "\n\n".
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      let sepIndex;
+      while ((sepIndex = buffer.indexOf('\n\n')) !== -1) {
+        const rawMessage = buffer.slice(0, sepIndex);
+        buffer = buffer.slice(sepIndex + 2);
+        const dataLine = rawMessage.split('\n').find(line => line.startsWith('data: '));
+        if (!dataLine) continue;
+        const event = JSON.parse(dataLine.slice('data: '.length));
+        events.push(event);
+        handleEvent(event, taskOrder);
+      }
+    }
   } catch (err) {
     statusEl.textContent = 'Error: ' + err.message;
     statusEl.classList.add('active');
+    submitEl.disabled = false;
     return;
   }
+
+  render({ events, final_outputs: computeFinalOutputs(events, taskOrder) });
   statusEl.classList.remove('active');
   submitEl.disabled = false;
+}
+
+// Builds the same shape the old synchronous endpoint used to return in one
+// shot, but from the accumulated event stream: the latest analyst_step_done
+// per task, in plan order.
+function computeFinalOutputs(events, taskOrder) {
+  const latestByTask = {};
+  events
+    .filter(e => e.type === 'analyst_step_done')
+    .forEach(e => { latestByTask[e.data.task_id] = e.data; });
+  return taskOrder.map(id => latestByTask[id]).filter(Boolean);
+}
+
+function handleEvent(event, taskOrder) {
+  switch (event.type) {
+    case 'research_started':
+      statusEl.textContent = 'Planning…';
+      break;
+    case 'planner_done':
+      taskOrder.length = 0;
+      event.data.tasks.forEach(t => taskOrder.push(t.id));
+      planEl.innerHTML = event.data.tasks.map(t => `<span class="chip">${escapeHtml(t.id)}</span>`).join('');
+      statusEl.textContent = `Plan ready: ${event.data.tasks.length} sub-task(s)`;
+      break;
+    case 'analyst_step_started':
+      statusEl.textContent = `Analyst researching "${event.data.task_id}"`
+        + (event.data.revision ? ` (revision ${event.data.revision})` : '') + '…';
+      break;
+    case 'verification_done':
+      statusEl.textContent = `Checking groundedness for "${event.data.task_id}"…`;
+      break;
+    case 'critic_review':
+      statusEl.textContent = event.data.verdict === 'approved'
+        ? `Critic approved "${event.data.task_id}"`
+        : `Critic requested changes for "${event.data.task_id}"`;
+      break;
+    case 'revision_requested':
+      statusEl.textContent = `Revising "${event.data.task_id}"…`;
+      break;
+    case 'research_completed':
+      statusEl.textContent = 'Finalizing…';
+      break;
+    case 'research_error':
+      statusEl.textContent = 'Error: ' + event.data.message;
+      break;
+  }
 }
 
 function render(data) {
